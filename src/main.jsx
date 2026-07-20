@@ -26,7 +26,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { supabase } from './supabaseClient'
+import { supabase, supabaseConfig } from './supabaseClient'
 import './style.css'
 
 const PK = 'Asia/Karachi'
@@ -81,6 +81,13 @@ async function getFunctionError(error) {
   return error.message || 'Something went wrong.'
 }
 
+function friendlyAuthError(error) {
+  const message = error?.message || 'Unable to sign in right now.'
+  if (/invalid login credentials/i.test(message)) return 'The email or password is incorrect.'
+  if (/failed to fetch|network|fetch/i.test(message)) return 'Cannot reach the secure server. Check your connection and try again.'
+  return message
+}
+
 function App() {
   const [authSession, setAuthSession] = useState(null)
   const [profile, setProfile] = useState(null)
@@ -128,12 +135,23 @@ function App() {
   useEffect(() => {
     let mounted = true
 
-    supabase.auth.getSession().then(({ data, error }) => {
-      if (!mounted) return
-      if (error) setFatalError(error.message)
-      setAuthSession(data.session || null)
-      if (!data.session) setBooting(false)
-    })
+    async function restoreSession() {
+      try {
+        const { data, error } = await supabase.auth.getSession()
+        if (!mounted) return
+        if (error) throw error
+        setAuthSession(data.session || null)
+      } catch (error) {
+        if (mounted) {
+          setAuthSession(null)
+          setFatalError(friendlyAuthError(error))
+        }
+      } finally {
+        if (mounted) setBooting(false)
+      }
+    }
+
+    restoreSession()
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setAuthSession(session || null)
@@ -386,6 +404,7 @@ function App() {
         <header>
           <button className="icon menu-button" aria-label="Open menu" onClick={() => setMenuOpen(true)}><Menu /></button>
           <div className="header-label"><span>YAAFU Workspace</span><small>Pakistan Standard Time</small></div>
+          <div className="system-status"><span />Secure connection</div>
           <button className="refresh" onClick={() => loadWorkspace(profile)} disabled={syncing}>
             <RefreshCw size={16} className={syncing ? 'spin' : ''} />
             <span>Sync</span>
@@ -436,6 +455,71 @@ function App() {
   )
 }
 
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { failed: false }
+  }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  componentDidCatch(error, info) {
+    console.error('YAAFU workspace failed to render', error, info)
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children
+
+    return (
+      <div className="system-page">
+        <div className="system-card">
+          <div className="system-logo"><img src="/logo.svg" alt="YAAFU Enterprises" /></div>
+          <div className="system-icon danger"><AlertTriangle /></div>
+          <span className="eyebrow">APPLICATION ERROR</span>
+          <h1>The workspace could not open</h1>
+          <p>An unexpected browser error stopped the application. Reload the page to start a clean session.</p>
+          <button className="system-primary" onClick={() => window.location.reload()}><RefreshCw />Reload workspace</button>
+        </div>
+      </div>
+    )
+  }
+}
+
+function ConfigurationScreen() {
+  const details = supabaseConfig.missingVariables.length
+    ? `Missing: ${supabaseConfig.missingVariables.join(', ')}`
+    : supabaseConfig.error
+
+  return (
+    <div className="system-page configuration-page">
+      <div className="system-card configuration-card">
+        <div className="system-logo"><img src="/logo.svg" alt="YAAFU Enterprises" /></div>
+        <div className="system-icon"><ShieldCheck /></div>
+        <span className="eyebrow">DEPLOYMENT SETUP REQUIRED</span>
+        <h1>Connect this deployment to Supabase</h1>
+        <p>The website built correctly, but it needs two public Supabase variables before the secure login can load.</p>
+        <div className="config-variables">
+          <code>VITE_SUPABASE_URL</code>
+          <code>VITE_SUPABASE_PUBLISHABLE_KEY</code>
+        </div>
+        <div className="config-alert"><AlertTriangle />{details || 'The Supabase configuration is invalid.'}</div>
+        <ol className="config-steps">
+          <li>Open the Vercel project and go to <b>Settings → Environment Variables</b>.</li>
+          <li>Add both variables for <b>Production</b> and <b>Preview</b>.</li>
+          <li>Open <b>Deployments</b> and redeploy the latest commit.</li>
+        </ol>
+        <div className="system-actions">
+          <a className="system-primary" href="https://vercel.com/dashboard" target="_blank" rel="noreferrer">Open Vercel dashboard <ChevronRight /></a>
+          <a className="system-secondary" href="https://supabase.com/dashboard" target="_blank" rel="noreferrer">Open Supabase</a>
+        </div>
+        <small>Use a publishable key only. Never place a secret or service-role key in this frontend.</small>
+      </div>
+    </div>
+  )
+}
+
 
 function PasswordInput({ id, value, onChange, autoComplete, placeholder, minLength, required = true }) {
   const [visible, setVisible] = useState(false)
@@ -477,12 +561,17 @@ function AuthScreen({ fatalError }) {
     event.preventDefault()
     setBusy(true)
     setError('')
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email: login.email.trim().toLowerCase(),
-      password: login.password,
-    })
-    if (signInError) setError(signInError.message)
-    setBusy(false)
+    try {
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: login.email.trim().toLowerCase(),
+        password: login.password,
+      })
+      if (signInError) throw signInError
+    } catch (signInError) {
+      setError(friendlyAuthError(signInError))
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -493,13 +582,19 @@ function AuthScreen({ fatalError }) {
           <div className="brand-kicker">SECURE WORKFORCE CRM</div>
           <h1>Work smarter.<br />Stay accountable.</h1>
           <p>Attendance, timesheets, employee management and leave approvals in one secure workspace.</p>
+          <div className="brand-points">
+            <span><Clock3 />Live attendance tracking</span>
+            <span><Users />Secure employee management</span>
+            <span><ShieldCheck />Protected by role-based access</span>
+          </div>
           <div className="tz"><Clock3 size={17} />Pakistan Standard Time · Asia/Karachi</div>
         </div>
 
         <form className="login-card" onSubmit={signIn}>
+          <div className="portal-badge"><span />Employee portal</div>
           <div className="login-icon"><LockKeyhole /></div>
           <h2>Welcome back</h2>
-          <p>Sign in to your YAAFU workspace</p>
+          <p>Use your approved YAAFU account to continue.</p>
           <label htmlFor="login-email">Email address</label>
           <input id="login-email" type="email" required autoComplete="email" value={login.email} onChange={(event) => setLogin({ ...login, email: event.target.value })} />
           <label htmlFor="login-password">Password</label>
@@ -511,6 +606,7 @@ function AuthScreen({ fatalError }) {
           />
           {error && <div className="error">{error}</div>}
           <button disabled={busy}>{busy ? <><LoaderCircle className="spin" />Signing in...</> : 'Login securely'}</button>
+          <div className="login-trust"><ShieldCheck />Your session is encrypted and access-controlled.</div>
         </form>
       </div>
     </div>
@@ -518,7 +614,7 @@ function AuthScreen({ fatalError }) {
 }
 
 function LoadingScreen() {
-  return <div className="loading-screen"><img src="/logo.svg" alt="YAAFU" /><LoaderCircle className="spin" /><b>Loading secure workspace...</b></div>
+  return <div className="loading-screen"><img src="/logo.svg" alt="YAAFU" /><LoaderCircle className="spin" /><b>Loading secure workspace...</b><span>Restoring your protected session</span></div>
 }
 
 function Dashboard({ session, current, todayRecord, doCheck, mine, leaves, busy }) {
@@ -875,4 +971,10 @@ function Empty({ title = 'No records found', message = 'Your data will appear he
   return <div className="empty">{icon}<b>{title}</b><span>{message}</span></div>
 }
 
-createRoot(document.getElementById('root')).render(<App />)
+createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <AppErrorBoundary>
+      {supabaseConfig.isConfigured ? <App /> : <ConfigurationScreen />}
+    </AppErrorBoundary>
+  </React.StrictMode>,
+)

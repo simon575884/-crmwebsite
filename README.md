@@ -22,6 +22,23 @@ React + Vite workforce CRM connected to Supabase Auth, Postgres and Edge Functio
 4. Sign in with the permanent main administrator account.
 5. Create employee accounts from **Users** in the admin panel.
 
+## Vercel deployment
+
+Import the GitHub repository into Vercel. The included `vercel.json` pins the project to Vite, uses `npm run build`, and publishes the `dist` directory.
+
+Add these variables in **Vercel → Project Settings → Environment Variables** before deploying:
+
+```text
+VITE_SUPABASE_URL=https://your-project-ref.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_your_key
+```
+
+Enable them for Production and Preview, then redeploy the latest commit. A variable added after a deployment does not affect that existing deployment.
+
+Only use a Supabase publishable key in the frontend. Never add a secret or service-role key to Vercel's `VITE_` variables.
+
+If the variables are missing or invalid, the application shows a deployment setup screen instead of failing with a blank page.
+
 ## Supabase components
 
 Tables:
