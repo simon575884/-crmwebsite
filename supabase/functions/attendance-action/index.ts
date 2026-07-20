@@ -45,42 +45,60 @@ Deno.serve(async (req: Request) => {
   const { data: userData } = await callerClient.auth.getUser(token);
   if (!userData.user) return respond({ error: "Invalid session" }, 401);
 
-  const { data: profile } = await callerClient.from("profiles").select("active").eq("id", userData.user.id).single();
+  const { data: profile } = await callerClient.from("profiles").select("role, active").eq("id", userData.user.id).single();
   if (profile?.active !== true) return respond({ error: "Account is inactive" }, 403);
 
   const body = await req.json().catch(() => ({}));
   const action = String(body.action ?? "");
-  if (!["check_in", "check_out"].includes(action)) return respond({ error: "Invalid attendance action" }, 400);
+  if (!["check_in", "check_out", "clear_day"].includes(action)) return respond({ error: "Invalid attendance action" }, 400);
 
   const adminClient = createClient(url, secretKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
+
+  if (action === "clear_day") {
+    if (profile.role !== "admin") return respond({ error: "Admin access required" }, 403);
+    const targetUserId = String(body.user_id ?? "");
+    const targetWorkDate = String(body.work_date ?? "");
+    if (!targetUserId || !/^\d{4}-\d{2}-\d{2}$/.test(targetWorkDate)) {
+      return respond({ error: "A valid employee and work date are required" }, 400);
+    }
+    const { data, error } = await adminClient
+      .from("attendance")
+      .delete()
+      .eq("user_id", targetUserId)
+      .eq("work_date", targetWorkDate)
+      .select("id");
+    if (error) return respond({ error: error.message }, 400);
+    return respond({ success: true, deleted_sessions: data?.length ?? 0 });
+  }
+
   const workDate = pakistanDate();
   const { data: existing, error: readError } = await adminClient
     .from("attendance")
     .select("id, check_in, check_out")
     .eq("user_id", userData.user.id)
     .eq("work_date", workDate)
+    .is("check_out", null)
     .maybeSingle();
   if (readError) return respond({ error: readError.message }, 400);
 
   const timestamp = new Date().toISOString();
   if (action === "check_in") {
     if (existing) {
-      return respond({ error: existing.check_out ? "Attendance is already completed for today" : "You are already checked in" }, 409);
+      return respond({ error: "You are already checked in" }, 409);
     }
     const { data, error } = await adminClient
       .from("attendance")
       .insert({ user_id: userData.user.id, work_date: workDate, check_in: timestamp })
       .select()
       .single();
+    if (error?.code === "23505") return respond({ error: "You are already checked in" }, 409);
     if (error) return respond({ error: error.message }, 400);
     return respond({ success: true, record: data }, 201);
   }
 
   if (!existing) return respond({ error: "No check-in found for today" }, 409);
-  if (existing.check_out) return respond({ error: "Attendance is already completed for today" }, 409);
-
   const { data, error } = await adminClient
     .from("attendance")
     .update({ check_out: timestamp })

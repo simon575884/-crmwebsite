@@ -7,6 +7,8 @@ import {
   ChevronRight,
   ClipboardList,
   Clock3,
+  Coffee,
+  History,
   LayoutDashboard,
   LoaderCircle,
   LockKeyhole,
@@ -17,11 +19,13 @@ import {
   Menu,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   ShieldCheck,
   Timer,
   Trash2,
   UserCircle2,
+  UserRoundCheck,
   UserPlus,
   Users,
   X,
@@ -59,6 +63,23 @@ function durationFmt(start, end = now(), includeSeconds = false) {
   const seconds = totalSeconds % 60
   const base = `${hours}h ${String(minutes).padStart(2, '0')}m`
   return includeSeconds ? `${base} ${String(seconds).padStart(2, '0')}s` : base
+}
+
+function millisecondsFmt(milliseconds, includeSeconds = false) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  const base = `${hours}h ${String(minutes).padStart(2, '0')}m`
+  return includeSeconds ? `${base} ${String(seconds).padStart(2, '0')}s` : base
+}
+
+function recordDuration(record, activeNow = now()) {
+  return durationMs(record.check_in, record.check_out || activeNow)
+}
+
+function sortSessions(records) {
+  return [...records].sort((a, b) => new Date(a.check_in) - new Date(b.check_in))
 }
 
 function useCurrentTime(intervalMs = 1000) {
@@ -226,8 +247,11 @@ function App() {
     () => records.filter((record) => record.user_id === profile?.id),
     [records, profile?.id],
   )
-  const todayRecord = mine.find((record) => record.work_date === today) || null
-  const current = todayRecord && !todayRecord.check_out ? todayRecord : null
+  const todayRecords = useMemo(
+    () => sortSessions(mine.filter((record) => record.work_date === today)),
+    [mine, today],
+  )
+  const current = todayRecords.find((record) => !record.check_out) || null
 
   const doCheck = async (action) => {
     if (!profile || actionBusy) return
@@ -363,6 +387,25 @@ function App() {
     }
   }
 
+  const clearAttendanceDay = async (userId, workDate) => {
+    if (profile.role !== 'admin') return false
+    setActionBusy(`clear-${userId}-${workDate}`)
+    try {
+      const { error } = await supabase.functions.invoke('attendance-action', {
+        body: { action: 'clear_day', user_id: userId, work_date: workDate },
+      })
+      if (error) throw new Error(await getFunctionError(error))
+      await loadWorkspace(profile, true)
+      notify(`Attendance for ${workDateFmt(workDate)} cleared.`)
+      return true
+    } catch (error) {
+      notify(error.message || 'Attendance could not be cleared.', 'error')
+      return false
+    } finally {
+      setActionBusy('')
+    }
+  }
+
   if (booting) return <LoadingScreen />
   if (!authSession || !profile) return <AuthScreen fatalError={fatalError} notify={notify} />
 
@@ -420,7 +463,7 @@ function App() {
             <Dashboard
               session={profile}
               current={current}
-              todayRecord={todayRecord}
+              todayRecords={todayRecords}
               doCheck={doCheck}
               mine={mine}
               leaves={leaves}
@@ -448,7 +491,14 @@ function App() {
               busy={actionBusy}
             />
           )}
-          {page === 'reports' && profile.role === 'admin' && <Reports records={records} users={users} />}
+          {page === 'reports' && profile.role === 'admin' && (
+            <Reports
+              records={records}
+              users={users}
+              onClearAttendance={clearAttendanceDay}
+              busy={actionBusy}
+            />
+          )}
         </section>
       </main>
     </div>
@@ -617,21 +667,18 @@ function LoadingScreen() {
   return <div className="loading-screen"><img src="/logo.svg" alt="YAAFU" /><LoaderCircle className="spin" /><b>Loading secure workspace...</b><span>Restoring your protected session</span></div>
 }
 
-function Dashboard({ session, current, todayRecord, doCheck, mine, leaves, busy }) {
+function Dashboard({ session, current, todayRecords, doCheck, mine, leaves, busy }) {
   const time = useCurrentTime()
   const [pendingAction, setPendingAction] = useState(null)
   const monthDays = useMemo(
     () => new Set(mine.filter((record) => record.work_date.startsWith(todayYM())).map((record) => record.work_date)).size,
     [mine],
   )
-  const durationValue = current
-    ? durationFmt(current.check_in, time, true)
-    : todayRecord?.check_out
-      ? durationFmt(todayRecord.check_in, todayRecord.check_out)
-      : '—'
-  const statusValue = current ? 'Checked in' : todayRecord?.check_out ? 'Completed' : 'Not checked in'
+  const todayActiveMs = todayRecords.reduce((sum, record) => sum + recordDuration(record, time), 0)
+  const durationValue = todayRecords.length ? millisecondsFmt(todayActiveMs, Boolean(current)) : '—'
+  const statusValue = current ? 'Checked in' : todayRecords.length ? 'Checked out' : 'Not checked in'
   const nextAction = current ? 'check_out' : 'check_in'
-  const attendanceCompleted = Boolean(todayRecord?.check_out)
+  const lastSession = todayRecords[todayRecords.length - 1] || null
 
   const confirmAttendance = async () => {
     const action = pendingAction
@@ -647,35 +694,34 @@ function Dashboard({ session, current, todayRecord, doCheck, mine, leaves, busy 
       <div className="stats">
         <Card title="Current time" value={timeFmt(time)} icon={<Clock3 />} />
         <Card title="Today's status" value={statusValue} icon={<Check />} />
-        <Card title={current ? 'Active duration' : 'Today’s hours'} value={durationValue} icon={<Timer />} />
+        <Card title={current ? 'Today’s active time' : 'Today’s hours'} value={durationValue} icon={<Timer />} />
         <Card title="This month" value={`${monthDays} ${monthDays === 1 ? 'day' : 'days'}`} icon={<CalendarDays />} />
       </div>
       <div className="grid2 dashboard-grid">
         <div className="panel check">
           <div className="panel-label">TODAY'S ATTENDANCE</div>
-          <h3>{current ? 'You are currently active' : attendanceCompleted ? 'Attendance completed' : 'Ready to begin?'}</h3>
+          <h3>{current ? 'You are currently active' : todayRecords.length ? 'Ready to resume?' : 'Ready to begin?'}</h3>
           <div className="bigclock">{timeFmt(time)}</div>
           <div className="datepill">{dateFmt(time)}</div>
           <button
             className={current ? 'danger' : ''}
             onClick={() => setPendingAction(nextAction)}
-            disabled={busy || attendanceCompleted}
+            disabled={busy}
           >
             {busy
               ? <><LoaderCircle className="spin" />Saving...</>
-              : attendanceCompleted
-                ? <><Check />Completed for today</>
-                : current
+              : current
                   ? <><LogOut />Check out</>
                   : <><LogIn />Check in</>}
           </button>
           {current && <div className="active-note"><span className="pulse" />Checked in at {timeFmt(new Date(current.check_in))} · {durationFmt(current.check_in, time, true)}</div>}
-          {attendanceCompleted && <p>Checked in at {timeFmt(new Date(todayRecord.check_in))} and checked out at {timeFmt(new Date(todayRecord.check_out))}.</p>}
-          {!current && !attendanceCompleted && <p>Only one attendance record is allowed per day.</p>}
+          {!current && lastSession?.check_out && <p>Last session ended at {timeFmt(new Date(lastSession.check_out))}. Check in again when your break finishes.</p>}
+          {!todayRecords.length && <p>Your first check-in starts today’s attendance timeline.</p>}
+          {todayRecords.length > 0 && <div className="session-count"><History />{todayRecords.length} session{todayRecords.length === 1 ? '' : 's'} recorded today</div>}
         </div>
         <div className="panel">
           <div className="panelhead compact-head"><div><div className="panel-label">RECENT ACTIVITY</div><h3>Attendance history</h3></div><span className="record-count">{mine.length} records</span></div>
-          <TimesheetTable records={mine.slice(0, 6)} users={[session]} compact />
+          <TimesheetTable records={mine.slice(0, 6)} users={[session]} compact activeNow={time} />
           {!mine.length && <Empty />}
         </div>
       </div>
@@ -684,8 +730,10 @@ function Dashboard({ session, current, todayRecord, doCheck, mine, leaves, busy 
         open={Boolean(pendingAction)}
         title={pendingAction === 'check_out' ? 'Confirm check-out' : 'Confirm check-in'}
         message={pendingAction === 'check_out'
-          ? 'Are you sure you want to check out? Your active hours for today will stop now.'
-          : 'Are you sure you want to check in? Your working time will start immediately.'}
+          ? 'Are you sure you want to check out? This session will end now and you can check in again later today.'
+          : todayRecords.length
+            ? 'Start a new work session? The gap since your last check-out will appear as a break in the admin timeline.'
+            : 'Are you sure you want to check in? Your working time will start immediately.'}
         confirmLabel={pendingAction === 'check_out' ? 'Yes, check out' : 'Yes, check in'}
         tone={pendingAction === 'check_out' ? 'danger' : 'primary'}
         onCancel={() => setPendingAction(null)}
@@ -700,20 +748,29 @@ function Card({ title, value, icon }) {
 }
 
 function Timesheet({ records, users }) {
+  const activeNow = useCurrentTime()
   return (
     <div className="panel">
       <div className="panelhead"><div><span className="eyebrow">ATTENDANCE</span><h2>My timesheet</h2><p>Your daily check-in, check-out and active hours</p></div></div>
-      <TimesheetTable records={records} users={users} />
+      <TimesheetTable records={records} users={users} activeNow={activeNow} />
       {!records.length && <Empty />}
     </div>
   )
 }
 
 function TimesheetTable({ records, users, compact = false, activeNow = now() }) {
+  const sessionNumbers = new Map()
+  const groups = new Map()
+  records.forEach((record) => {
+    const key = `${record.user_id}-${record.work_date}`
+    groups.set(key, [...(groups.get(key) || []), record])
+  })
+  groups.forEach((group) => sortSessions(group).forEach((record, index) => sessionNumbers.set(record.id, index + 1)))
+
   return (
     <div className="table-wrap">
       <table className={compact ? 'compact-table' : ''}>
-        <thead><tr>{!compact && <th>Employee</th>}<th>Date</th><th>Check in</th><th>Check out</th><th>Hours</th></tr></thead>
+        <thead><tr>{!compact && <th>Employee</th>}<th>Date</th><th>Session</th><th>Check in</th><th>Check out</th><th>Hours</th></tr></thead>
         <tbody>{records.map((record) => {
           const user = users.find((item) => item.id === record.user_id)
           const hours = record.check_out
@@ -723,6 +780,7 @@ function TimesheetTable({ records, users, compact = false, activeNow = now() }) 
             <tr key={record.id}>
               {!compact && <td><b>{user?.full_name || 'User'}</b><small>{user?.email}</small></td>}
               <td>{workDateFmt(record.work_date)}</td>
+              <td><span className="session-badge">#{sessionNumbers.get(record.id)}</span></td>
               <td>{timeFmt(new Date(record.check_in))}</td>
               <td>{record.check_out ? timeFmt(new Date(record.check_out)) : <span className="live-badge">Active</span>}</td>
               <td><b>{hours}</b></td>
@@ -737,6 +795,9 @@ function TimesheetTable({ records, users, compact = false, activeNow = now() }) 
 function Leave({ session, users, leaves, onSubmit, onUpdate, busy }) {
   const minimumDate = todayDate()
   const [form, setForm] = useState({ from: '', to: '', type: 'Annual Leave', reason: '' })
+  const requestedDays = form.from && form.to
+    ? Math.floor((new Date(`${form.to}T00:00:00+05:00`) - new Date(`${form.from}T00:00:00+05:00`)) / 86400000) + 1
+    : 0
   const submit = async (event) => {
     event.preventDefault()
     const saved = await onSubmit(form)
@@ -756,12 +817,13 @@ function Leave({ session, users, leaves, onSubmit, onUpdate, busy }) {
       <form className="panel form-panel" onSubmit={submit}>
         <span className="eyebrow">NEW REQUEST</span>
         <h2>Apply for leave</h2>
-        <p>Past dates are disabled automatically.</p>
+        <p>Choose today or a future date. Past dates are blocked automatically.</p>
+        <div className="leave-date-notice"><CalendarDays /><span><b>Planning window</b>Requests start from {workDateFmt(minimumDate)} onward.</span></div>
         <div className="formgrid">
           <label>Leave type<select value={form.type} onChange={(event) => setForm({ ...form, type: event.target.value })}><option>Annual Leave</option><option>Sick Leave</option><option>Casual Leave</option><option>Unpaid Leave</option></select></label>
-          <label>From<input type="date" required min={minimumDate} value={form.from} onChange={(event) => updateFrom(event.target.value)} /></label>
-          <label>To<input type="date" required min={form.from || minimumDate} value={form.to} onChange={(event) => setForm({ ...form, to: event.target.value })} /></label>
-          <label className="full">Reason<textarea required minLength="3" placeholder="Briefly explain your leave request" value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })} /></label>
+          <label>Start date<input type="date" required min={minimumDate} value={form.from} onChange={(event) => updateFrom(event.target.value)} /><small>Past dates cannot be selected.</small></label>
+          <label>Return date<input type="date" required min={form.from || minimumDate} value={form.to} onChange={(event) => setForm({ ...form, to: event.target.value })} /><small>{requestedDays ? `${requestedDays} calendar day${requestedDays === 1 ? '' : 's'} selected` : 'Select the final leave date.'}</small></label>
+          <label className="full">Reason<textarea required minLength="3" maxLength="300" placeholder="Example: Family commitment or medical appointment" value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })} /><small className="character-count">{form.reason.length}/300 characters</small></label>
         </div>
         <button className="primary" disabled={busy === 'leave'}>{busy === 'leave' ? 'Submitting...' : 'Submit request'}</button>
       </form>
@@ -879,11 +941,12 @@ function UserAdmin({ currentUser, users, onCreate, onToggle, onDelete, busy }) {
   )
 }
 
-function Reports({ records, users }) {
-  const activeNow = useCurrentTime(30000)
+function Reports({ records, users, onClearAttendance, busy }) {
+  const activeNow = useCurrentTime()
   const [query, setQuery] = useState('')
   const [month, setMonth] = useState(todayYM())
   const [selectedUserId, setSelectedUserId] = useState(users[0]?.id || '')
+  const [clearTarget, setClearTarget] = useState(null)
 
   const visibleUsers = useMemo(() => {
     const normalized = query.trim().toLowerCase()
@@ -898,9 +961,19 @@ function Reports({ records, users }) {
 
   const selectedUser = users.find((user) => user.id === selectedUserId) || null
   const selectedRecords = records.filter((record) => record.user_id === selectedUserId && record.work_date.startsWith(month))
-  const totalMs = selectedRecords.reduce((sum, record) => sum + durationMs(record.check_in, record.check_out || activeNow), 0)
-  const totalHours = `${Math.floor(totalMs / 36e5)}h ${String(Math.floor((totalMs % 36e5) / 60000)).padStart(2, '0')}m`
-  const activeRecord = selectedRecords.find((record) => !record.check_out)
+  const totalMs = selectedRecords.reduce((sum, record) => sum + recordDuration(record, activeNow), 0)
+  const totalHours = millisecondsFmt(totalMs)
+  const activeRecord = records.find((record) => record.user_id === selectedUserId && !record.check_out) || null
+  const dailyGroups = Object.entries(selectedRecords.reduce((groups, record) => ({
+    ...groups,
+    [record.work_date]: [...(groups[record.work_date] || []), record],
+  }), {})).sort(([dateA], [dateB]) => dateB.localeCompare(dateA))
+
+  const confirmClear = async () => {
+    if (!clearTarget) return
+    const cleared = await onClearAttendance(selectedUserId, clearTarget)
+    if (cleared) setClearTarget(null)
+  }
 
   return (
     <div className="reports-shell">
@@ -936,15 +1009,78 @@ function Reports({ records, users }) {
             <div className="report-stats">
               <Card title="Days recorded" value={`${new Set(selectedRecords.map((record) => record.work_date)).size}`} icon={<CalendarDays />} />
               <Card title="Total active time" value={totalHours} icon={<Timer />} />
-              <Card title="Current status" value={activeRecord ? 'Active now' : 'Not active'} icon={<Clock3 />} />
+              <Card title="Current status" value={activeRecord ? 'Active now' : 'Checked out'} icon={<Clock3 />} />
             </div>
-            <div className="report-table-title"><h3>Daily attendance</h3><span>{selectedRecords.length} record(s)</span></div>
-            <TimesheetTable records={selectedRecords} users={users} activeNow={activeNow} />
+            <div className={`live-profile-status ${activeRecord ? 'is-active' : ''}`}>
+              <div className="live-profile-icon">{activeRecord ? <UserRoundCheck /> : <Coffee />}</div>
+              <div>
+                <span>{activeRecord ? 'LIVE NOW' : 'CURRENT STATUS'}</span>
+                <b>{activeRecord ? `${selectedUser.full_name} is actively working` : `${selectedUser.full_name} is not checked in`}</b>
+                <p>{activeRecord
+                  ? `Checked in at ${timeFmt(new Date(activeRecord.check_in))} · active for ${durationFmt(activeRecord.check_in, activeNow, true)}`
+                  : 'Their next check-in will start a new attendance session.'}</p>
+              </div>
+            </div>
+            <div className="report-table-title"><h3>Daily attendance timeline</h3><span>{selectedRecords.length} session(s)</span></div>
+            <div className="attendance-days">
+              {dailyGroups.map(([workDate, sessions]) => (
+                <AttendanceDayTimeline
+                  key={workDate}
+                  workDate={workDate}
+                  sessions={sessions}
+                  activeNow={activeNow}
+                  clearing={busy === `clear-${selectedUserId}-${workDate}`}
+                  onClear={() => setClearTarget(workDate)}
+                />
+              ))}
+            </div>
             {!selectedRecords.length && <Empty title="No attendance this month" message="No check-in record exists for the selected month." />}
           </>
         )}
       </div>
+      <ConfirmDialog
+        open={Boolean(clearTarget)}
+        title="Clear this attendance day?"
+        message={`${selectedUser?.full_name || 'This employee'}’s sessions and break timeline for ${clearTarget ? workDateFmt(clearTarget) : 'this day'} will be permanently removed.`}
+        confirmLabel="Clear attendance"
+        tone="danger"
+        busy={Boolean(clearTarget && busy === `clear-${selectedUserId}-${clearTarget}`)}
+        onCancel={() => setClearTarget(null)}
+        onConfirm={confirmClear}
+      />
     </div>
+  )
+}
+
+function AttendanceDayTimeline({ workDate, sessions, activeNow, clearing, onClear }) {
+  const ordered = sortSessions(sessions)
+  const totalMs = ordered.reduce((sum, record) => sum + recordDuration(record, activeNow), 0)
+
+  return (
+    <article className="attendance-day-card">
+      <header className="attendance-day-head">
+        <div><b>{workDateFmt(workDate)}</b><span>{ordered.length} work session{ordered.length === 1 ? '' : 's'} · {millisecondsFmt(totalMs)} active</span></div>
+        <button className="clear-day-button" onClick={onClear} disabled={clearing}><RotateCcw />{clearing ? 'Clearing...' : 'Clear day'}</button>
+      </header>
+      <div className="session-timeline">
+        {ordered.map((record, index) => {
+          const previous = ordered[index - 1]
+          const breakMs = previous?.check_out ? durationMs(previous.check_out, record.check_in) : 0
+          return (
+            <React.Fragment key={record.id}>
+              {index > 0 && (
+                <div className="break-row"><Coffee /><span>Break</span><b>{millisecondsFmt(breakMs, true)}</b><small>{timeFmt(new Date(previous.check_out))}–{timeFmt(new Date(record.check_in))}</small></div>
+              )}
+              <div className={`session-row ${!record.check_out ? 'active-session' : ''}`}>
+                <div className="session-index">{index + 1}</div>
+                <div><span>Session {index + 1}</span><b>{timeFmt(new Date(record.check_in))} → {record.check_out ? timeFmt(new Date(record.check_out)) : 'Active now'}</b></div>
+                <strong>{millisecondsFmt(recordDuration(record, activeNow), !record.check_out)}</strong>
+              </div>
+            </React.Fragment>
+          )
+        })}
+      </div>
+    </article>
   )
 }
 
