@@ -74,14 +74,18 @@ Deno.serve(async (req: Request) => {
   }
 
   const workDate = pakistanDate();
-  const { data: existing, error: readError } = await adminClient
+  // A shift can cross midnight. Always find the user's currently open session
+  // by status, not by today's calendar date.
+  let existingQuery = adminClient
     .from("attendance")
     .select("id, check_in, check_out")
     .eq("user_id", userData.user.id)
-    .eq("work_date", workDate)
     .is("check_out", null)
-    .maybeSingle();
+    .order("check_in", { ascending: false })
+    .limit(1);
+  const { data: openSessions, error: readError } = await existingQuery;
   if (readError) return respond({ error: readError.message }, 400);
+  const existing = openSessions?.[0] ?? null;
 
   const timestamp = new Date().toISOString();
   if (action === "check_in") {
@@ -98,7 +102,7 @@ Deno.serve(async (req: Request) => {
     return respond({ success: true, record: data }, 201);
   }
 
-  if (!existing) return respond({ error: "No check-in found for today" }, 409);
+  if (!existing) return respond({ error: "No active shift is waiting for checkout" }, 409);
   const { data, error } = await adminClient
     .from("attendance")
     .update({ check_out: timestamp })

@@ -6,6 +6,7 @@
 - Kept all password fields masked; passwords are never listed in the database profile table or admin UI.
 - Switched check-in/check-out to the secure `attendance-action` function.
 - Supports multiple check-in/check-out sessions on the same Pakistan calendar day.
+- Allows a shift to cross midnight: checkout always closes the active session, regardless of the new calendar date.
 - Groups same-day sessions into an admin timeline with calculated break gaps.
 - Prevents overlapping open sessions while allowing completed sessions to be followed by a new check-in.
 - Added an admin-only action to clear an employee's attendance for a selected day.

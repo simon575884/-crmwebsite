@@ -247,11 +247,11 @@ function App() {
     () => records.filter((record) => record.user_id === profile?.id),
     [records, profile?.id],
   )
-  const todayRecords = useMemo(
-    () => sortSessions(mine.filter((record) => record.work_date === today)),
-    [mine, today],
+  const current = mine.find((record) => !record.check_out) || null
+  const shiftRecords = useMemo(
+    () => sortSessions(mine.filter((record) => record.work_date === (current?.work_date || today))),
+    [mine, current?.work_date, today],
   )
-  const current = todayRecords.find((record) => !record.check_out) || null
 
   const doCheck = async (action) => {
     if (!profile || actionBusy) return
@@ -396,7 +396,7 @@ function App() {
       })
       if (error) throw new Error(await getFunctionError(error))
       await loadWorkspace(profile, true)
-      notify(`Attendance for ${workDateFmt(workDate)} cleared.`)
+      notify(`Shift starting ${workDateFmt(workDate)} cleared.`)
       return true
     } catch (error) {
       notify(error.message || 'Attendance could not be cleared.', 'error')
@@ -463,7 +463,7 @@ function App() {
             <Dashboard
               session={profile}
               current={current}
-              todayRecords={todayRecords}
+              shiftRecords={shiftRecords}
               doCheck={doCheck}
               mine={mine}
               leaves={leaves}
@@ -667,18 +667,14 @@ function LoadingScreen() {
   return <div className="loading-screen"><img src="/logo.svg" alt="YAAFU" /><LoaderCircle className="spin" /><b>Loading secure workspace...</b><span>Restoring your protected session</span></div>
 }
 
-function Dashboard({ session, current, todayRecords, doCheck, mine, leaves, busy }) {
+function Dashboard({ session, current, shiftRecords, doCheck, mine, leaves, busy }) {
   const time = useCurrentTime()
   const [pendingAction, setPendingAction] = useState(null)
-  const monthDays = useMemo(
-    () => new Set(mine.filter((record) => record.work_date.startsWith(todayYM())).map((record) => record.work_date)).size,
-    [mine],
-  )
-  const todayActiveMs = todayRecords.reduce((sum, record) => sum + recordDuration(record, time), 0)
-  const durationValue = todayRecords.length ? millisecondsFmt(todayActiveMs, Boolean(current)) : '—'
-  const statusValue = current ? 'Checked in' : todayRecords.length ? 'Checked out' : 'Not checked in'
+  const shiftActiveMs = shiftRecords.reduce((sum, record) => sum + recordDuration(record, time), 0)
+  const durationValue = shiftRecords.length ? millisecondsFmt(shiftActiveMs, Boolean(current)) : '—'
+  const statusValue = current ? 'Checked in' : shiftRecords.length ? 'Checked out' : 'Not checked in'
   const nextAction = current ? 'check_out' : 'check_in'
-  const lastSession = todayRecords[todayRecords.length - 1] || null
+  const lastSession = shiftRecords[shiftRecords.length - 1] || null
 
   const confirmAttendance = async () => {
     const action = pendingAction
@@ -694,13 +690,13 @@ function Dashboard({ session, current, todayRecords, doCheck, mine, leaves, busy
       <div className="stats">
         <Card title="Current time" value={timeFmt(time)} icon={<Clock3 />} />
         <Card title="Today's status" value={statusValue} icon={<Check />} />
-        <Card title={current ? 'Today’s active time' : 'Today’s hours'} value={durationValue} icon={<Timer />} />
-        <Card title="This month" value={`${monthDays} ${monthDays === 1 ? 'day' : 'days'}`} icon={<CalendarDays />} />
+        <Card title={current ? 'Current shift time' : 'Last shift time'} value={durationValue} icon={<Timer />} />
+        <Card title="Shift sessions" value={`${shiftRecords.length}`} icon={<CalendarDays />} />
       </div>
       <div className="grid2 dashboard-grid">
         <div className="panel check">
-          <div className="panel-label">TODAY'S ATTENDANCE</div>
-          <h3>{current ? 'You are currently active' : todayRecords.length ? 'Ready to resume?' : 'Ready to begin?'}</h3>
+          <div className="panel-label">SHIFT ATTENDANCE</div>
+          <h3>{current ? 'You are currently active' : shiftRecords.length ? 'Ready to resume?' : 'Ready to begin?'}</h3>
           <div className="bigclock">{timeFmt(time)}</div>
           <div className="datepill">{dateFmt(time)}</div>
           <button
@@ -715,9 +711,9 @@ function Dashboard({ session, current, todayRecords, doCheck, mine, leaves, busy
                   : <><LogIn />Check in</>}
           </button>
           {current && <div className="active-note"><span className="pulse" />Checked in at {timeFmt(new Date(current.check_in))} · {durationFmt(current.check_in, time, true)}</div>}
-          {!current && lastSession?.check_out && <p>Last session ended at {timeFmt(new Date(lastSession.check_out))}. Check in again when your break finishes.</p>}
-          {!todayRecords.length && <p>Your first check-in starts today’s attendance timeline.</p>}
-          {todayRecords.length > 0 && <div className="session-count"><History />{todayRecords.length} session{todayRecords.length === 1 ? '' : 's'} recorded today</div>}
+          {!current && lastSession?.check_out && <p>Last session ended at {timeFmt(new Date(lastSession.check_out))}. Check in again when your next shift starts.</p>}
+          {!shiftRecords.length && <p>Check in when your shift starts. Checkout can happen after midnight.</p>}
+          {shiftRecords.length > 0 && <div className="session-count"><History />{shiftRecords.length} session{shiftRecords.length === 1 ? '' : 's'} in this shift</div>}
         </div>
         <div className="panel">
           <div className="panelhead compact-head"><div><div className="panel-label">RECENT ACTIVITY</div><h3>Attendance history</h3></div><span className="record-count">{mine.length} records</span></div>
@@ -731,7 +727,7 @@ function Dashboard({ session, current, todayRecords, doCheck, mine, leaves, busy
         title={pendingAction === 'check_out' ? 'Confirm check-out' : 'Confirm check-in'}
         message={pendingAction === 'check_out'
           ? 'Are you sure you want to check out? This session will end now and you can check in again later today.'
-          : todayRecords.length
+          : shiftRecords.length
             ? 'Start a new work session? The gap since your last check-out will appear as a break in the admin timeline.'
             : 'Are you sure you want to check in? Your working time will start immediately.'}
         confirmLabel={pendingAction === 'check_out' ? 'Yes, check out' : 'Yes, check in'}
@@ -1007,7 +1003,7 @@ function Reports({ records, users, onClearAttendance, busy }) {
         {selectedUser && (
           <>
             <div className="report-stats">
-              <Card title="Days recorded" value={`${new Set(selectedRecords.map((record) => record.work_date)).size}`} icon={<CalendarDays />} />
+              <Card title="Shift start dates" value={`${new Set(selectedRecords.map((record) => record.work_date)).size}`} icon={<CalendarDays />} />
               <Card title="Total active time" value={totalHours} icon={<Timer />} />
               <Card title="Current status" value={activeRecord ? 'Active now' : 'Checked out'} icon={<Clock3 />} />
             </div>
@@ -1021,7 +1017,7 @@ function Reports({ records, users, onClearAttendance, busy }) {
                   : 'Their next check-in will start a new attendance session.'}</p>
               </div>
             </div>
-            <div className="report-table-title"><h3>Daily attendance timeline</h3><span>{selectedRecords.length} session(s)</span></div>
+            <div className="report-table-title"><h3>Shift timeline</h3><span>{selectedRecords.length} session(s)</span></div>
             <div className="attendance-days">
               {dailyGroups.map(([workDate, sessions]) => (
                 <AttendanceDayTimeline
@@ -1040,9 +1036,9 @@ function Reports({ records, users, onClearAttendance, busy }) {
       </div>
       <ConfirmDialog
         open={Boolean(clearTarget)}
-        title="Clear this attendance day?"
-        message={`${selectedUser?.full_name || 'This employee'}’s sessions and break timeline for ${clearTarget ? workDateFmt(clearTarget) : 'this day'} will be permanently removed.`}
-        confirmLabel="Clear attendance"
+        title="Clear this shift?"
+        message={`${selectedUser?.full_name || 'This employee'}’s sessions and break timeline starting ${clearTarget ? workDateFmt(clearTarget) : 'this date'} will be permanently removed.`}
+        confirmLabel="Clear shift"
         tone="danger"
         busy={Boolean(clearTarget && busy === `clear-${selectedUserId}-${clearTarget}`)}
         onCancel={() => setClearTarget(null)}
@@ -1060,7 +1056,7 @@ function AttendanceDayTimeline({ workDate, sessions, activeNow, clearing, onClea
     <article className="attendance-day-card">
       <header className="attendance-day-head">
         <div><b>{workDateFmt(workDate)}</b><span>{ordered.length} work session{ordered.length === 1 ? '' : 's'} · {millisecondsFmt(totalMs)} active</span></div>
-        <button className="clear-day-button" onClick={onClear} disabled={clearing}><RotateCcw />{clearing ? 'Clearing...' : 'Clear day'}</button>
+        <button className="clear-day-button" onClick={onClear} disabled={clearing}><RotateCcw />{clearing ? 'Clearing...' : 'Clear shift'}</button>
       </header>
       <div className="session-timeline">
         {ordered.map((record, index) => {
